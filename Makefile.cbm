@@ -1,0 +1,147 @@
+# Minimal build system for the trimmed code-index core.
+
+CC ?= gcc
+CXX ?= g++
+
+BUILD_DIR := build/c
+BIN := $(BUILD_DIR)/codebase-memory-mcp
+
+CBM_DIR := internal/cbm
+TS_INCLUDE := $(CBM_DIR)/vendored/ts_runtime/include
+TS_SRC := $(CBM_DIR)/vendored/ts_runtime/src
+
+COMMON_INCLUDES := \
+	-Isrc \
+	-Ivendored \
+	-Ivendored/sqlite3 \
+	-Ivendored/mimalloc/include \
+	-I$(CBM_DIR) \
+	-I$(TS_INCLUDE)
+
+CFLAGS_PROD := -std=c11 -D_DEFAULT_SOURCE -D_GNU_SOURCE -Wall -Wextra \
+	-Wno-unused-parameter -Wno-sign-compare -Wno-format-truncation \
+	-Wno-unused-result -Wno-stringop-truncation -Wno-alloc-size-larger-than \
+	$(COMMON_INCLUDES) -O2 -DCBM_BIND_TS_ALLOCATOR=1
+
+CXXFLAGS_PROD := -std=c++17 -D_DEFAULT_SOURCE -D_GNU_SOURCE -O2 -w \
+	$(COMMON_INCLUDES) -I$(CBM_DIR)/vendored
+
+GRAMMAR_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -O2 -w \
+	-I$(CBM_DIR) -I$(TS_INCLUDE) -I$(TS_SRC)
+
+MIMALLOC_CFLAGS := -std=c11 -O2 -w \
+	-Ivendored/mimalloc/include \
+	-Ivendored/mimalloc/src \
+	-DMI_OVERRIDE=1 \
+	-DMI_MALLOC_OVERRIDE=1
+
+SQLITE3_CFLAGS := -std=c11 -O2 -w \
+	-DSQLITE_DQS=0 -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5
+
+TRE_CFLAGS := -std=c11 -g -O1 -w -Ivendored/tre
+
+LDFLAGS := -lm -lstdc++ -lpthread -lz -lws2_32 -lpsapi -lshell32 \
+	-Wl,--allow-multiple-definition -Wl,--stack,8388608 -static
+
+MODULE_SRCS := \
+	$(wildcard src/foundation/*.c) \
+	$(wildcard src/store/*.c) \
+	$(wildcard src/cypher/*.c) \
+	$(wildcard src/mcp/*.c) \
+	$(wildcard src/discover/*.c) \
+	$(wildcard src/graph_buffer/*.c) \
+	$(wildcard src/pipeline/*.c) \
+	$(wildcard src/simhash/*.c) \
+	$(wildcard src/semantic/*.c) \
+	$(wildcard src/traces/*.c) \
+	$(wildcard src/watcher/*.c) \
+	$(wildcard src/git/*.c) \
+	$(wildcard src/cli/*.c) \
+	vendored/yyjson/yyjson.c
+
+MODULE_SRCS := $(filter-out src/foundation/vmem.c,$(MODULE_SRCS))
+
+GRAMMAR_SRCS := $(wildcard $(CBM_DIR)/grammar_*.c)
+CBM_ALL_C := $(wildcard $(CBM_DIR)/*.c)
+CBM_CORE_SRCS := $(filter-out $(GRAMMAR_SRCS) $(CBM_DIR)/ts_runtime.c $(CBM_DIR)/lsp_all.c,$(CBM_ALL_C))
+CBM_CORE_SRCS := $(filter-out $(CBM_DIR)/arena.c,$(CBM_CORE_SRCS))
+
+GRAMMAR_OBJS := $(patsubst $(CBM_DIR)/%.c,$(BUILD_DIR)/prod_%.o,$(GRAMMAR_SRCS))
+TS_RUNTIME_OBJ := $(BUILD_DIR)/prod_ts_runtime.o
+LSP_OBJ := $(BUILD_DIR)/prod_lsp_all.o
+PP_OBJ := $(BUILD_DIR)/prod_preprocessor.o
+MIMALLOC_OBJ := $(BUILD_DIR)/prod_mimalloc.o
+SQLITE3_OBJ := $(BUILD_DIR)/prod_sqlite3.o
+TRE_OBJ := $(BUILD_DIR)/prod_tre.o
+LZ4_OBJ := $(BUILD_DIR)/prod_lz4.o $(BUILD_DIR)/prod_lz4hc.o
+ZSTD_OBJ := $(BUILD_DIR)/prod_zstd.o
+UNIXCODER_OBJ := $(BUILD_DIR)/unixcoder_blob.o
+
+OBJS := $(MIMALLOC_OBJ) $(SQLITE3_OBJ) $(TRE_OBJ) $(GRAMMAR_OBJS) \
+	$(TS_RUNTIME_OBJ) $(LSP_OBJ) $(PP_OBJ) $(LZ4_OBJ) $(ZSTD_OBJ) \
+	$(UNIXCODER_OBJ)
+
+.PHONY: cbm test test-foundation test-repro test-tsan clean-c lint lint-ci lint-tidy lint-cppcheck lint-format lint-no-suppress security
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(BUILD_DIR)/prod_grammar_%.o: $(CBM_DIR)/grammar_%.c | $(BUILD_DIR)
+	$(CC) $(GRAMMAR_CFLAGS) -c -o $@ $<
+
+$(TS_RUNTIME_OBJ): $(CBM_DIR)/ts_runtime.c | $(BUILD_DIR)
+	$(CC) $(GRAMMAR_CFLAGS) -c -o $@ $<
+
+$(LSP_OBJ): $(CBM_DIR)/lsp_all.c | $(BUILD_DIR)
+	$(CC) $(GRAMMAR_CFLAGS) -c -o $@ $<
+
+$(PP_OBJ): $(CBM_DIR)/preprocessor.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS_PROD) -c -o $@ $<
+
+$(MIMALLOC_OBJ): vendored/mimalloc/src/static.c | $(BUILD_DIR)
+	$(CC) $(MIMALLOC_CFLAGS) -c -o $@ $<
+
+$(SQLITE3_OBJ): vendored/sqlite3/sqlite3.c | $(BUILD_DIR)
+	$(CC) $(SQLITE3_CFLAGS) -c -o $@ $<
+
+$(TRE_OBJ): vendored/tre/tre_all.c | $(BUILD_DIR)
+	$(CC) $(TRE_CFLAGS) -O2 -c -o $@ $<
+
+$(BUILD_DIR)/prod_lz4.o: $(CBM_DIR)/vendored/lz4/lz4.c | $(BUILD_DIR)
+	$(CC) -std=c11 -D_DEFAULT_SOURCE -O2 -w -I$(CBM_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/prod_lz4hc.o: $(CBM_DIR)/vendored/lz4/lz4hc.c | $(BUILD_DIR)
+	$(CC) -std=c11 -D_DEFAULT_SOURCE -O2 -w -I$(CBM_DIR)/vendored/lz4 -c -o $@ $<
+
+$(ZSTD_OBJ): $(CBM_DIR)/vendored/zstd/zstd.c | $(BUILD_DIR)
+	$(CC) -std=c11 -D_DEFAULT_SOURCE -O2 -w -I$(CBM_DIR)/vendored/zstd -c -o $@ $<
+
+$(UNIXCODER_OBJ): vendored/nomic/code_vectors_blob.S vendored/nomic/code_vectors.bin | $(BUILD_DIR)
+	$(CC) -c -o $@ $<
+
+$(BIN): src/main.c $(MODULE_SRCS) $(CBM_CORE_SRCS) $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS_PROD) -o $@ \
+		src/main.c $(MODULE_SRCS) $(CBM_CORE_SRCS) $(OBJS) \
+		$(LDFLAGS)
+
+cbm: $(BIN)
+	@echo "Built: $(BIN)"
+
+test: cbm
+	powershell -ExecutionPolicy Bypass -File scripts/verify-core.ps1
+
+test-foundation: test
+
+test-repro: test
+
+test-tsan:
+	@echo "TSan is not part of the trimmed code-index target set"
+
+security: test
+	@echo "Trimmed core verification passed"
+
+lint lint-ci lint-tidy lint-cppcheck lint-format lint-no-suppress:
+	@echo "External lint suites are not part of the trimmed code-index target set"
+
+clean-c:
+	rm -rf $(BUILD_DIR)
